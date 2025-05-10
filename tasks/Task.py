@@ -2,6 +2,7 @@ from typing import List, Union
 from tasks.Step import Step # Import Step class
 
 class Task:
+    # todo: accept only steps, not dicts
     def __init__(self, name: str, task_list: List[Union[Step, dict]] = None):
         self._name = name
         # Initialize _task_list before using the setter for the None case or empty list

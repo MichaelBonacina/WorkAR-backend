@@ -1,7 +1,14 @@
-import openai
 import os
 import base64
+import logging
 from typing import List, Dict, Union
+from dotenv import load_dotenv
+
+# Use the Langfuse openai wrapper instead of the regular openai
+from langfuse.openai import openai
+
+# Load environment variables
+load_dotenv()
 
 class OpenAI:
     @staticmethod
@@ -20,7 +27,8 @@ class OpenAI:
     @staticmethod
     def frameAnalysis(prompt: str, image_paths: List[str]) -> str:
         """
-        Sends a prompt and a list of image paths to gpt-4o-mini for processing.
+        Sends a prompt and a list of image paths to gpt-4-mini for processing.
+        Uses the Langfuse OpenAI wrapper for automatic monitoring.
 
         Args:
             prompt: The text prompt to send to the model.
@@ -32,15 +40,18 @@ class OpenAI:
         Raises:
             RuntimeError: If the OpenAI API key is not set or if the API call fails.
         """
+        # Get API key
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY environment variable not set.")
 
+        # Create OpenAI client using Langfuse wrapper
         client = openai.OpenAI(api_key=api_key)
 
+        # Prepare message content with text prompt
         messages_content = [{"type": "text", "text": prompt}]
-        #print("messages_content: ", messages_content)
         
+        # Add images to message content
         for image_path in image_paths:
             try:
                 base64_image = OpenAI._encode_image_to_base64(image_path)
@@ -61,23 +72,20 @@ class OpenAI:
                     }
                 })
             except Exception as e:
-                # Propagate the error or handle it by skipping the image
                 print(f"Skipping image {image_path} due to encoding error: {e}")
-                # Depending on desired behavior, you might want to raise an error here
-                # or collect errors and report them, or just skip.
-                # For now, let's re-raise to make it explicit if an image fails.
                 raise RuntimeError(f"Failed to encode image {image_path}") from e
 
         try:
+            # Make the API call - tracing is automatic with the Langfuse openai wrapper
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "user",
                         "content": messages_content
                     }
                 ],
-                max_tokens=1000  # Adjust as needed
+                max_tokens=10000  # Adjust as needed
             )
             
             if response.choices and response.choices[0].message and response.choices[0].message.content:

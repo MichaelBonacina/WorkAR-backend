@@ -3,4 +3,9 @@ google-generativeai>=0.0.0
 python-dotenv>=0.10.0
 openai>=1.78.0
 websockets>=15.0.1
-requests>=2.32.3 
+requests>=2.32.3
+fal-client>=0.6.0
+Pillow>=10.0.0
+langfuse>=2.0.0 
+replicate
+PyQt5>=5.15.0

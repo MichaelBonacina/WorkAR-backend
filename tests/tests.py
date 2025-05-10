@@ -20,18 +20,10 @@ from tests.upload_video import upload_video # Import the new upload_video functi
 
 if __name__ == "__main__":
     print("Executing tests from tests.py...")
-    
-    # First, test the video upload functionality
-    print("\n--- Running Video Upload Test ---")
-    upload_successful = upload_video()
-    
-    if upload_successful:
-        print("\nVideo upload test passed. Proceeding to end-to-end test which relies on an active task.")
-        # Call the end-to-end test function
-        # This assumes the upload_video call has set an active task for the WebSocket server
-        print("\n--- Running End-to-End Test (after successful upload) ---")
-        test_end2end() # This test also calls processFrame internally
-    else:
-        print("\nVideo upload test failed.")
+
+    test_video_processing()
+    test_frame_processing()
+
+
     
     
