@@ -143,7 +143,7 @@ In all cases, the status field is required. The focus_objects and action fields 
                 tmp_dir = os.path.join(os.getcwd(), "media", "tmp_frames")
                 os.makedirs(tmp_dir, exist_ok=True)
                 vis_path = os.path.join(tmp_dir, f"frame_process_{uuid.uuid4()}.jpg")
-                vis_img.save(vis_path)
+                vis_img.convert("RGB").save(vis_path)
                 
                 # Log the visualization to the GUI
                 metadata = {
@@ -229,7 +229,7 @@ In all cases, the status field is required. The focus_objects and action fields 
                         
                         # Save visualization
                         vis_result_path = os.path.join(tmp_dir, f"result_{uuid.uuid4()}.jpg")
-                        vis_img.save(vis_result_path)
+                        vis_img.convert("RGB").save(vis_result_path)
                         
                         # Log visualization to GUI
                         result_metadata = {

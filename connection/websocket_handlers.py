@@ -23,6 +23,7 @@ from processing.processFrame import processFrame
 from models.owlv2 import OWLv2
 from models.open_vocab_bbox_model import OpenVocabBBoxDetectionModel
 from connection.message_queue import message_queue, log_message, image_received, state_changed
+from connection.websocket_logger import websocket_logger
 import asyncio
 import time
 
@@ -46,14 +47,6 @@ connected_clients: Set[WebSocketServerProtocol] = set()
 bbox_model: OpenVocabBBoxDetectionModel = OWLv2()
 
 is_processing_frame = False # Global flag to track if a frame is currently being processed
-
-# Add these global variables after the other global variables
-last_frame_process_time = 0  # Track when we last processed a frame
-MIN_FRAME_INTERVAL = 0.2  # Minimum time between frames (200ms)
-
-# Add this global variable to track visualizations
-visualization_counter = 0
-MAX_VISUALIZATIONS_PER_SECOND = 2  # Limit to 2 visualizations per second
 
 def _get_temp_frames_abs_dir() -> str:
     """
@@ -192,6 +185,9 @@ async def log_and_send(websocket: WebSocketServerProtocol,
         
         # Log to GUI using message queue
         log_message("info", f"Sending message to client{client_info}", "server")
+        
+        # Log to file system for debugging
+        websocket_logger.log_outgoing_message(parsed)
     except:
         # Fallback if not valid JSON or other error
         logging.debug(f"⟹ Sending message to {client_addr}: [non-JSON data, len={len(message)}]")
@@ -284,6 +280,15 @@ async def process_frame_with_metadata(
                     allow_visualization=allow_visualization
                 )
                 
+                # Log the call with results
+                websocket_logger.log_add_object_coordinates_call(
+                    frame=image_file_path,
+                    camera_pose=camera_pose,
+                    allow_visualization=allow_visualization,
+                    objects=[obj.to_dict() for obj in first_instruction.objects] if first_instruction.objects else None,
+                    result=first_instruction.to_dict()
+                )
+                
                 # Send the instruction to the client
                 await log_and_send(websocket, first_instruction.to_json(), client_addr)
                 
@@ -296,10 +301,25 @@ async def process_frame_with_metadata(
                 traceback.print_exc()
                 # Fall through to regular processing
         
+        # Log the processFrame call for debugging (this pre-operation log is redundant)
+        # websocket_logger.log_process_frame_call(
+        #     task_state=current_task_state,
+        #     video_state=video_state,
+        #     allow_visualization=allow_visualization
+        # )
+        
         # Process the frame and send results
         current_status = processFrame.processFrame(current_task_state, video_state, allow_visualization)
         logging.info(f"Current status: {current_status}")
         log_message("info", f"Frame processing result: {current_status}", "server")
+        
+        # Log the process frame result
+        websocket_logger.log_process_frame_call(
+            task_state=current_task_state,
+            video_state=video_state,
+            allow_visualization=allow_visualization,
+            result=current_status
+        )
         
         # Update task state in GUI
         if current_task_state:
@@ -319,12 +339,24 @@ async def process_frame_with_metadata(
                 latest_image = video_state.get_images()[-1] if video_state.get_images() else None
                 if latest_image:
                     instruction = ARGlassesInstruction.from_step('derailed', current_task_state.getCurrentStep())
-                    instruction.addObjectCoordinates(
+                    
+                    # Add object coordinates
+                    instruction = instruction.addObjectCoordinates(
                         frame=latest_image, 
                         bbox_detection_model=bbox_model,
                         camera_pose=camera_pose,
                         allow_visualization=allow_visualization
                     )
+                    
+                    # Log with results
+                    websocket_logger.log_add_object_coordinates_call(
+                        frame=latest_image,
+                        camera_pose=camera_pose,
+                        allow_visualization=allow_visualization,
+                        objects=[obj.to_dict() for obj in instruction.objects] if instruction.objects else None,
+                        result=instruction.to_dict()
+                    )
+                    
                     await log_and_send(websocket, instruction.to_json(), client_addr)
             except Exception as e:
                 logging.error(f"Error finding object coordinates: {e}")
@@ -361,6 +393,16 @@ async def process_frame_with_metadata(
                         camera_pose=camera_pose,
                         allow_visualization=allow_visualization
                     )
+                    
+                    # Log with results
+                    websocket_logger.log_add_object_coordinates_call(
+                        frame=latest_image,
+                        camera_pose=camera_pose,
+                        allow_visualization=allow_visualization,
+                        objects=[obj.to_dict() for obj in next_instruction.objects] if next_instruction.objects else None,
+                        result=next_instruction.to_dict()
+                    )
+                    
                     logging.info(f"Added object coordinates for next step with {len(next_instruction.objects) if next_instruction.objects else 0} objects")
             except Exception as e:
                 logging.error(f"Error finding object coordinates for next step: {e}")
@@ -469,6 +511,10 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                     # Pretty print metadata for logging
                     pretty_metadata = json.dumps(current_metadata, indent=2)
                     expecting_metadata = False  # Next message should be image data
+                    
+                    # Log incoming message to file system
+                    websocket_logger.log_incoming_message(current_metadata)
+                    
                 except json.JSONDecodeError as e:
                     logging.error(f"⟸ Invalid metadata JSON from {client_addr}: {e}")
                     log_message("error", f"Invalid metadata JSON: {e}", "client")
@@ -486,18 +532,6 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                 logging.info(f"⟸ Received image data from {client_addr}: {len(message)/1024:.1f} KB")
                 log_message("info", f"Received image data: {len(message)/1024:.1f} KB", "client")
                 
-                # Check if we need to skip this frame due to rate limiting
-                global last_frame_process_time
-                current_time = time.time()
-                time_since_last = current_time - last_frame_process_time
-                
-                if time_since_last < MIN_FRAME_INTERVAL:
-                    logging.info(f"⟸ Rate limiting: Skipping frame from {client_addr}, only {time_since_last:.3f}s since last frame")
-                    log_message("info", f"Rate limiting: Skipping frame (too frequent)", "server")
-                    expecting_metadata = True  # Reset for next frame
-                    current_metadata = None
-                    continue
-                
                 # Generate unique filename and save the image immediately
                 unique_filename = f"{uuid.uuid4()}.jpg"
                 image_file_path = os.path.join(temp_frames_abs_dir, unique_filename)
@@ -507,6 +541,9 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                     with open(image_file_path, "wb") as f:
                         f.write(message)
                     client_frames.append(image_file_path)  # Track this frame for later cleanup
+                    
+                    # Log incoming image to file system
+                    websocket_logger.log_incoming_image(message, current_metadata)
                     
                     # Notify GUI about the received image immediately
                     image_received(image_file_path, current_metadata, str(client_addr))
@@ -543,17 +580,6 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                 expecting_metadata = True
                 current_metadata = None
                 
-                # Limit visualization rate
-                current_time = time.time()
-                if current_time - last_frame_process_time >= 1.0:  # Reset counter every second
-                    visualization_counter = 0
-                    
-                # Increment counter when processing a new frame    
-                visualization_counter += 1
-                
-                # Set a flag to control visualization output based on counter
-                allow_visualization = visualization_counter <= MAX_VISUALIZATIONS_PER_SECOND
-                
                 # Create background task for processing
                 asyncio.create_task(
                     process_frame_background(
@@ -564,7 +590,7 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                         temp_frames_abs_dir,
                         client_frames,
                         image_file_path,
-                        allow_visualization  # Pass flag to control visualization
+                        True  # Always allow visualization
                     )
                 )
                     
@@ -632,20 +658,9 @@ async def process_frame_background(
         image_file_path: Path to the saved image file
         allow_visualization: Flag to control visualization output
     """
-    global is_processing_frame, last_frame_process_time, visualization_counter
+    global is_processing_frame
     
     try:
-        # Limit visualization rate
-        current_time = time.time()
-        if current_time - last_frame_process_time >= 1.0:  # Reset counter every second
-            visualization_counter = 0
-            
-        # Increment counter when processing a new frame    
-        visualization_counter += 1
-        
-        # Set a flag to control visualization output based on counter
-        allow_visualization = visualization_counter <= MAX_VISUALIZATIONS_PER_SECOND
-        
         # Process the frame
         await process_frame_with_metadata(
             websocket,
@@ -655,11 +670,8 @@ async def process_frame_background(
             temp_frames_abs_dir,
             client_frames,
             image_file_path,
-            allow_visualization  # Pass flag to control visualization
+            allow_visualization
         )
-        
-        # Update the last process time
-        last_frame_process_time = time.time()
         
     except Exception as e:
         logging.error(f"Error in background frame processing: {e}")

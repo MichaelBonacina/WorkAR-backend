@@ -323,6 +323,11 @@ class ARGlassesInstruction:
             
             # Save the visualization
             vis_path = str(Path(image_path).with_name(f"vis_{Path(image_path).name}"))
+            
+            # Convert to RGB mode if the image has an alpha channel (RGBA)
+            if vis_image.mode == 'RGBA':
+                vis_image = vis_image.convert('RGB')
+                
             vis_image.save(vis_path)
             
             # Log the visualization
