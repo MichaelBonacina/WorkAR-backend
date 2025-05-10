@@ -2,9 +2,11 @@ import google.generativeai as genai
 import os
 import time
 from dotenv import load_dotenv
+from langfuse.decorators import langfuse_context, observe
 
 class Gemini:
     @staticmethod
+    @observe(as_type="generation")
     def videoAnalysis(prompt: str, video_file: str, 
                       initial_poll_interval_seconds: float = 2.0,
                       processing_timeout_seconds: float = 300.0): # 5 minutes timeout
@@ -34,6 +36,12 @@ class Gemini:
                         print(f"Cleaned up timed-out upload: {video_file_uploaded.name}")
                     except Exception as e_del_timeout:
                         print(f"Error cleaning up timed-out upload {video_file_uploaded.name}: {e_del_timeout}")
+                    
+                    # Update Langfuse with error
+                    langfuse_context.update_current_observation(
+                        status="error",
+                        error=f"Video processing timed out for {video_file} after {processing_timeout_seconds} seconds."
+                    )
                     return {"error": f"Video processing timed out for {video_file} after {processing_timeout_seconds} seconds."}
 
                 time.sleep(current_poll_interval)
@@ -48,6 +56,12 @@ class Gemini:
                     print(f"Cleaned up failed upload: {video_file_uploaded.name}")
                 except Exception as e_del_failed:
                     print(f"Error cleaning up failed upload {video_file_uploaded.name}: {e_del_failed}")
+                
+                # Update Langfuse with error
+                langfuse_context.update_current_observation(
+                    status="error",
+                    error=f"Video processing failed for {video_file}."
+                )
                 return {"error": f"Video processing failed for {video_file}."}
             
             print("Video processed. Generating content with Gemini...")
@@ -57,6 +71,18 @@ class Gemini:
             # Make the API call
             response = model.generate_content([prompt, video_file_uploaded])
             print("gemini response: ", response)
+            
+            # Track usage metrics in Langfuse
+            langfuse_context.update_current_observation(
+                input=prompt,
+                output=response.text,
+                model="gemini-2.5-pro-preview-05-06",
+                usage_details={
+                    "input": response.usage_metadata.prompt_token_count if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'prompt_token_count') else None,
+                    "output": response.usage_metadata.candidates_token_count if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'candidates_token_count') else None,
+                    "total": response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'total_token_count') else None
+                }
+            )
             
             # Clean up the uploaded file
             try:
@@ -80,4 +106,10 @@ class Gemini:
                          print(f"Cleaned up file {video_file_uploaded.name} after error.")
                 except Exception as e_cleanup:
                     print(f"Error during cleanup for {video_file_uploaded.name} after an exception: {e_cleanup}. It might have been already deleted or never fully created.")
+            
+            # Update Langfuse with error
+            langfuse_context.update_current_observation(
+                status="error",
+                error=str(e)
+            )
             return {"error": str(e)}

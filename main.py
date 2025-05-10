@@ -2,9 +2,18 @@ import os
 import asyncio
 import threading
 import time # Added for the main loop sleep
+import logging
 from flask import Flask
 from connection.instructionUpload import register_instruction_upload_blueprint
 from connection.websocket import start_websocket_server_async # Renamed function
+from models.langfuse_config import initialize_langfuse
+
+# Set up logging
+logging.basicConfig(
+    format='[%(asctime)s] p%(process)s {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s',
+    datefmt='%m-%d %H:%M:%S',
+    level=logging.INFO
+)
 
 # Configuration
 FLASK_HOST = '0.0.0.0'
@@ -52,6 +61,13 @@ def run_websocket_server_in_thread(app_root_for_ws):
 
 if __name__ == '__main__':
     print("Starting application...")
+
+    # Initialize Langfuse for monitoring
+    langfuse_client = initialize_langfuse()
+    if langfuse_client:
+        logging.info("Langfuse monitoring initialized successfully")
+    else:
+        logging.warning("Langfuse monitoring not available - check your environment variables")
 
     # Create media directory
     media_dir_abs = flask_app.config['MEDIA_FOLDER']
