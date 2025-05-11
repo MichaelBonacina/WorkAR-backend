@@ -1,8 +1,8 @@
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Tuple
 from dataclasses import dataclass
 import concurrent.futures
 import traceback
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFile
 from models.owlv2 import OWLv2
 from models.open_vocab_bbox_model import OpenVocabBBoxDetectionModel
 from processing.task_status import TaskStatus
@@ -10,7 +10,6 @@ from tasks.Step import Step
 import logging
 from connection.message_queue import log_message
 import os
-from PIL import Image, ImageDraw
 import uuid
 from pathlib import Path
 import datetime
@@ -171,7 +170,7 @@ class ARGlassesInstruction:
     def addObjectCoordinates(self, frame: Union[str, Image.Image], 
                             bbox_detection_model: Optional[OpenVocabBBoxDetectionModel] = None,
                             camera_pose: Optional[Dict[str, Any]] = None,
-                            allow_visualization: bool = True) -> 'ARGlassesInstruction':
+                            allow_visualization: bool = True) -> bool:
         """
         Enhances this ARGlassesInstruction by detecting coordinates of focus objects.
         
@@ -182,8 +181,10 @@ class ARGlassesInstruction:
             allow_visualization: Flag to control whether to create and send visualizations
             
         Returns:
-            ARGlassesInstruction: The enhanced result with object coordinates (self)
+            bool: True if coordinates were found for at least one object, False otherwise
         """
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        
         # Store camera pose information if provided
         if camera_pose is not None:
             self.coordinates_relative_to_camera_pose = camera_pose
@@ -191,7 +192,7 @@ class ARGlassesInstruction:
         # Early return if no focus objects to process
         if not self.objects:
             log_message("info", "No objects to detect coordinates for", "object_detection")
-            return self
+            return False
         
         # Log the classes we're searching for
         object_names = [obj.title for obj in self.objects]
@@ -213,7 +214,7 @@ class ARGlassesInstruction:
                 traceback.print_exc()
                 log_message("error", f"Error opening image file: {str(e)}", "object_detection")
                 self.message = f"Error detecting object coordinates: {str(e)}"
-                return self
+                return False
         elif isinstance(frame, Image.Image):
             pil_image = frame
             # Save a temporary copy for visualization
@@ -222,18 +223,27 @@ class ARGlassesInstruction:
             image_path = os.path.join(tmp_dir, f"temp_{uuid.uuid4()}.jpg")
             pil_image.save(image_path)
             log_message("info", "Processing image from PIL object", "object_detection")
+            # Make sure the image is fully loaded into memory so copies don't rely on a shared file pointer
+            try:
+                pil_image.load()  # type: ignore[attr-defined]
+            except Exception as e:
+                log_message("warning", f"Could not fully load PIL image before processing: {e}", "object_detection")
         else:
             log_message("error", "Invalid frame format - must be PIL Image or path to image file", "object_detection")
             self.message = "Invalid frame format - must be PIL Image or path to image file"
-            return self
+            return False
+        
+        found_any_coordinates = False
             
         # Use ThreadPoolExecutor to process objects in parallel
         with concurrent.futures.ThreadPoolExecutor() as executor:
             # Create a function to process a single object
-            def process_object(obj: ObjectInfo) -> ObjectInfo:
+            def process_object(obj: ObjectInfo) -> Tuple[ObjectInfo, bool]:
+                found_coords = False
                 try:
                     # Call the model to detect the object
-                    detection_response = model(pil_image, obj.title)
+                    image_for_thread = pil_image.copy()
+                    detection_response = model(image_for_thread, obj.title)
                     
                     # Process the detected objects - find the best match if multiple
                     if detection_response.objects:
@@ -265,6 +275,7 @@ class ARGlassesInstruction:
                         # Update the object with coordinates and bbox
                         obj.coordinates = {"x": center_x, "y": center_y}
                         obj.bbox = best_bbox
+                        found_coords = True
                         
                     else:
                         log_message("warning", f"Could not detect {obj.title} in image", "object_detection")
@@ -276,7 +287,7 @@ class ARGlassesInstruction:
                     # Don't modify the object if there was an error
                     pass
                     
-                return obj
+                return obj, found_coords
                 
             # Process all objects in parallel
             future_to_obj = {
@@ -286,14 +297,15 @@ class ARGlassesInstruction:
             
             # Collect the results
             for future in concurrent.futures.as_completed(future_to_obj):
-                # We don't need to do anything since process_object modifies the objects in place
-                pass
+                _, found_coords = future.result()
+                if found_coords:
+                    found_any_coordinates = True
         
         # After all processing, visualize the results on the image
         try:
             # Skip visualization if not allowed (to reduce GUI load)
             if not allow_visualization:
-                return self
+                return found_any_coordinates
                 
             # Create a copy for visualization
             vis_image = pil_image.copy()
@@ -349,4 +361,4 @@ class ARGlassesInstruction:
             traceback.print_exc()
             log_message("error", f"Error creating visualization: {str(e)}", "object_detection")
             
-        return self
+        return found_any_coordinates

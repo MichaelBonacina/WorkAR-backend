@@ -141,7 +141,9 @@ async def _start_server(host, port):
         new_frame_handler, 
         host, 
         port, 
-        max_size=MAX_MESSAGE_SIZE
+        max_size=MAX_MESSAGE_SIZE,
+        ping_interval=60,  # Send a ping every 60 seconds
+        ping_timeout=20    # Wait 20 seconds for a pong response
     )
     
     # Log server information

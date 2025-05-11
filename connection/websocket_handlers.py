@@ -13,7 +13,7 @@ import traceback
 import websockets
 import glob
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Set, Union
+from typing import Dict, List, Any, Optional, Set, Union, Tuple
 from websockets.server import WebSocketServerProtocol
 from processing.ar_glasses_instruction import ARGlassesInstruction
 from states.VideoState import VideoState
@@ -46,7 +46,11 @@ connected_clients: Set[WebSocketServerProtocol] = set()
 # Create a single OWLv2 model instance to be reused (using the abstract type for type hinting)
 bbox_model: OpenVocabBBoxDetectionModel = OWLv2()
 
+# Global flag to track if a frame is currently being processed
 is_processing_frame = False # Global flag to track if a frame is currently being processed
+
+# Create a lock for frame processing to prevent race conditions
+processing_lock = asyncio.Lock()
 
 def _get_temp_frames_abs_dir() -> str:
     """
@@ -165,6 +169,11 @@ async def log_and_send(websocket: WebSocketServerProtocol,
         message: The message to send (either a string or object to be converted to JSON)
         client_addr: Optional client address for logging
     """
+    # Check if the WebSocket is closed before trying to send
+    if websocket.state == websockets.protocol.State.CLOSED:
+        logging.warning(f"Cannot send message to {client_addr}: WebSocket is closed")
+        return
+    
     if not isinstance(message, str):
         message = json.dumps(message)
     
@@ -222,7 +231,7 @@ async def process_frame_with_metadata(
     Returns:
         bool: True if processing was successful, False otherwise
     """
-    global is_processing_frame, current_task_state, video_state
+    global current_task_state, video_state
     
     # Log incoming metadata in a pretty format
     pretty_metadata = json.dumps(metadata, indent=2)
@@ -273,13 +282,13 @@ async def process_frame_with_metadata(
                 first_instruction = ARGlassesInstruction.from_step('executing_task', first_step)
                 
                 # Add object coordinates to instruction
-                first_instruction = first_instruction.addObjectCoordinates(
+                found_any_coordinates = first_instruction.addObjectCoordinates(
                     frame=image_file_path,
                     bbox_detection_model=bbox_model,
                     camera_pose=camera_pose,
                     allow_visualization=allow_visualization
                 )
-                
+
                 # Log the call with results
                 websocket_logger.log_add_object_coordinates_call(
                     frame=image_file_path,
@@ -341,12 +350,17 @@ async def process_frame_with_metadata(
                     instruction = ARGlassesInstruction.from_step('derailed', current_task_state.getCurrentStep())
                     
                     # Add object coordinates
-                    instruction = instruction.addObjectCoordinates(
+                    found_any_coordinates = instruction.addObjectCoordinates(
                         frame=latest_image, 
                         bbox_detection_model=bbox_model,
                         camera_pose=camera_pose,
                         allow_visualization=allow_visualization
                     )
+
+                    if not found_any_coordinates:
+                        logging.warning("No object coordinates found for the derailed frame. Skipping instruction.")
+                        log_message("warning", "No object coordinates found for the derailed frame. Skipping instruction.", "server")
+                        return True
                     
                     # Log with results
                     websocket_logger.log_add_object_coordinates_call(
@@ -469,7 +483,6 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
         websocket: The WebSocket connection object
         path: The connection path (unused but was required by older websockets versions)
     """
-    global is_processing_frame # Ensure we're using the global flag
     connected_clients.add(websocket)
     client_addr = websocket.remote_address
     client_frames: List[str] = []  # Track frames for this client
@@ -561,8 +574,8 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                     current_metadata = None
                     continue
                 
-                # Now handle processing - skip if processor is busy
-                if is_processing_frame:
+                # Check if the lock is already held (processor is busy)
+                if processing_lock.locked():
                     logging.info(f"⟸ Processor busy, dropping frame from {client_addr}")
                     log_message("warning", f"Processor busy, dropping frame", "server")
                     expecting_metadata = True  # Reset, expecting metadata again
@@ -570,19 +583,15 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                     continue
 
                 # Create a copy of the metadata and other values needed for processing
-                # since we'll be resetting the current_metadata before processing completes
                 metadata_copy = current_metadata.copy() if current_metadata else {}
                 
-                # Start processing in a background task
-                is_processing_frame = True  # Acquire lock
-                
-                # We can proceed with the next frame immediately
+                # Reset state for next frame before processing begins
                 expecting_metadata = True
                 current_metadata = None
                 
-                # Create background task for processing
-                asyncio.create_task(
-                    process_frame_background(
+                # Process the frame while holding the lock
+                async with processing_lock:
+                    await process_frame_with_metadata(
                         websocket,
                         message,
                         metadata_copy,
@@ -592,7 +601,6 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
                         image_file_path,
                         True  # Always allow visualization
                     )
-                )
                     
             else:
                 # Handle unexpected message type
@@ -634,49 +642,3 @@ async def new_frame_handler(websocket: WebSocketServerProtocol, path: Optional[s
         
         logging.info(f"Client disconnected: {client_addr}. Total clients: {len(connected_clients)}")
         log_message("info", f"Client disconnected: {client_addr}. Total clients: {len(connected_clients)}", "server")
-
-async def process_frame_background(
-    websocket: WebSocketServerProtocol,
-    image_data: bytes,
-    metadata: Dict[str, Any],
-    client_addr: tuple,
-    temp_frames_abs_dir: str,
-    client_frames: List[str],
-    image_file_path: str,
-    allow_visualization: bool
-) -> None:
-    """
-    Process a frame in a background task to not block the WebSocket handler.
-    
-    Args:
-        websocket: The WebSocket connection
-        image_data: Binary image data (JPG)
-        metadata: JSON metadata associated with the image
-        client_addr: Client address for logging
-        temp_frames_abs_dir: Directory to store temporary frames
-        client_frames: List to track client frame paths
-        image_file_path: Path to the saved image file
-        allow_visualization: Flag to control visualization output
-    """
-    global is_processing_frame
-    
-    try:
-        # Process the frame
-        await process_frame_with_metadata(
-            websocket,
-            image_data,
-            metadata,
-            client_addr,
-            temp_frames_abs_dir,
-            client_frames,
-            image_file_path,
-            allow_visualization
-        )
-        
-    except Exception as e:
-        logging.error(f"Error in background frame processing: {e}")
-        log_message("error", f"Error in background frame processing: {e}", "server")
-        traceback.print_exc()
-    finally:
-        # Release the lock so next frame can be processed
-        is_processing_frame = False
